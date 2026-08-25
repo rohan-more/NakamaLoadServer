@@ -59,18 +59,15 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		return err
 	}		
 
-	
+	if err := initializer.RegisterAfterAuthenticateDevice(afterAuthenticateDevice); err != nil {
+		return err
+	}
 
-/* 
 	if err := initializer.RegisterMatch(moduleName, func(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule) (runtime.Match, error) {
-		return &MatchHandler{
-			marshaler:        marshaler,
-			unmarshaler:      unmarshaler,
-			tfServingAddress: "http://tf:8501/v1/models/ttt:predict",
-		}, nil
+		return &MatchHandlerShooter{}, nil
 	}); err != nil {
 		return err
-	} */
+	}
 
 	if err := registerSessionEvents(db, nk, initializer); err != nil {
 		return err
