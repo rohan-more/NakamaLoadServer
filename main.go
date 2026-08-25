@@ -33,6 +33,7 @@ var (
 const (
 	rpcIdRewards   = "rewards"
 	rpcIdFindMatch = "find_match"
+	rpcIdAddScore  = "add_score"
 )
 
 // noinspection GoUnusedExportedFunction
@@ -54,6 +55,13 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		return err
 	}
 
+	if err := initializer.RegisterRpc(rpcIdAddScore, rpcAddScore); err != nil {
+		return err
+	}		
+
+	
+
+/* 
 	if err := initializer.RegisterMatch(moduleName, func(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule) (runtime.Match, error) {
 		return &MatchHandler{
 			marshaler:        marshaler,
@@ -62,7 +70,7 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		}, nil
 	}); err != nil {
 		return err
-	}
+	} */
 
 	if err := registerSessionEvents(db, nk, initializer); err != nil {
 		return err
