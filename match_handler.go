@@ -23,6 +23,7 @@ const (
 
 type PlayerState struct {
 	UserID       string `json:"user_id"`
+	Username     string `json:"username"`
 	Health       int    `json:"health"`
 	LastShotTick int64  `json:"-"`
 }
@@ -30,6 +31,19 @@ type PlayerState struct {
 type MatchState struct {
 	Players map[string]*PlayerState `json:"players"`
 	Started bool                    `json:"started"`
+}
+
+// Wire format for broadcastState. Unity's JsonUtility can't deserialize a
+// map, so the map keyed by user id is flattened to a slice here.
+type PlayerStateDto struct {
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+	Health   int    `json:"health"`
+}
+
+type MatchStateDto struct {
+	Players []PlayerStateDto `json:"players"`
+	Started bool             `json:"started"`
 }
 
 type MatchHandlerShooter struct{}
@@ -64,6 +78,7 @@ func (m *MatchHandlerShooter) MatchJoin(ctx context.Context, logger runtime.Logg
 	for _, p := range presences {
 		mState.Players[p.GetUserId()] = &PlayerState{
 			UserID:       p.GetUserId(),
+			Username:     p.GetUsername(),
 			Health:       startingHealth,
 			LastShotTick: 0,
 		}
@@ -155,11 +170,23 @@ func isMatchOver(mState *MatchState) bool {
 }
 
 func broadcastState(logger runtime.Logger, dispatcher runtime.MatchDispatcher, mState *MatchState) {
-	stateBytes, err := json.Marshal(mState)
+	dto := MatchStateDto{
+		Players: make([]PlayerStateDto, 0, len(mState.Players)),
+		Started: mState.Started,
+	}
+	for _, p := range mState.Players {
+		dto.Players = append(dto.Players, PlayerStateDto{
+			UserID:   p.UserID,
+			Username: p.Username,
+			Health:   p.Health,
+		})
+	}
+
+	stateBytes, err := json.Marshal(dto)
 	if err != nil {
 		logger.Error("Failed to marshal match state: %v", err)
 		return
-	}	
+	}
 	dispatcher.BroadcastMessage(OpCodeStateSync, stateBytes, nil, nil, true)
 }
 

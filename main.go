@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"github.com/heroiclabs/nakama-common/runtime"
-	"google.golang.org/protobuf/encoding/protojson"
 	"time"
 )
 
@@ -31,33 +30,26 @@ var (
 )
 
 const (
-	rpcIdRewards   = "rewards"
-	rpcIdFindMatch = "find_match"
-	rpcIdAddScore  = "add_score"
+	rpcIdRewards     = "rewards"
+	rpcIdAddScore    = "add_score"
+	rpcIdCreateMatch = "create_match"
 )
 
 // noinspection GoUnusedExportedFunction
 func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
 	initStart := time.Now()
 
-	marshaler := &protojson.MarshalOptions{
-		UseEnumNumbers: true,
-	}
-	unmarshaler := &protojson.UnmarshalOptions{
-		DiscardUnknown: false,
-	}
-
 	if err := initializer.RegisterRpc(rpcIdRewards, rpcRewards); err != nil {
-		return err
-	}
-
-	if err := initializer.RegisterRpc(rpcIdFindMatch, rpcFindMatch(marshaler, unmarshaler)); err != nil {
 		return err
 	}
 
 	if err := initializer.RegisterRpc(rpcIdAddScore, rpcAddScore); err != nil {
 		return err
-	}		
+	}
+
+	if err := initializer.RegisterRpc(rpcIdCreateMatch, rpcCreateMatch); err != nil {
+		return err
+	}
 
 	if err := initializer.RegisterAfterAuthenticateDevice(afterAuthenticateDevice); err != nil {
 		return err
