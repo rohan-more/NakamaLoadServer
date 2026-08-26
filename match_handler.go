@@ -14,12 +14,18 @@ const (
 
 	OpCodeShoot     = 1
 	OpCodeStateSync = 2
+	OpCodeMatchOver = 3
 
 	maxPlayers      = 2
 	startingHealth  = 100
 	cooldownTicks   = 20 // 2 seconds at 10 ticks/sec
 	tickRate        = 10
 )
+
+type MatchOverPayload struct {
+	WinnerID       string `json:"winner_id"`
+	WinnerUsername string `json:"winner_username"`
+}
 
 type PlayerState struct {
 	UserID       string `json:"user_id"`
@@ -31,6 +37,11 @@ type PlayerState struct {
 type MatchState struct {
 	Players map[string]*PlayerState `json:"players"`
 	Started bool                    `json:"started"`
+	// Set once the match is decided. The match is kept alive for a short
+	// grace period afterwards so clients reliably receive OpCodeMatchOver
+	// before the handler returns nil and Nakama tears the match down.
+	Finished     bool  `json:"finished"`
+	FinishedTick int64 `json:"finished_tick"`
 }
 
 // Wire format for broadcastState. Unity's JsonUtility can't deserialize a
@@ -138,9 +149,15 @@ func (m *MatchHandlerShooter) MatchLoop(ctx context.Context, logger runtime.Logg
 		broadcastState(logger, dispatcher, mState)
 	}
 
-	if isMatchOver(mState) {
+	if isMatchOver(mState) && !mState.Finished {
 		logger.Info("Match over")
-		return nil
+		mState.Finished = true
+		mState.FinishedTick = tick
+		broadcastMatchOver(logger, dispatcher, mState)
+	}
+
+	if mState.Finished && tick-mState.FinishedTick >= 50 {
+	return nil
 	}
 
 	return mState
@@ -188,6 +205,27 @@ func broadcastState(logger runtime.Logger, dispatcher runtime.MatchDispatcher, m
 		return
 	}
 	dispatcher.BroadcastMessage(OpCodeStateSync, stateBytes, nil, nil, true)
+}
+
+// The winner is the last player still standing. Both players can be at zero
+// health if they forfeit together, in which case the winner fields are left
+// empty and clients should treat it as a draw.
+func broadcastMatchOver(logger runtime.Logger, dispatcher runtime.MatchDispatcher, mState *MatchState) {
+	var payload MatchOverPayload
+	for _, p := range mState.Players {
+		if p.Health > 0 {
+			payload.WinnerID = p.UserID
+			payload.WinnerUsername = p.Username
+			break
+		}
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		logger.Error("Failed to marshal match over payload: %v", err)
+		return
+	}
+	dispatcher.BroadcastMessage(OpCodeMatchOver, payloadBytes, nil, nil, true)
 }
 
 func (m *MatchHandlerShooter) MatchTerminate(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, graceSeconds int) interface{} {
