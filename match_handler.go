@@ -64,10 +64,10 @@ func (m *MatchHandlerShooter) MatchInit(ctx context.Context, logger runtime.Logg
 		Players: make(map[string]*PlayerState),
 		Started: false,
 	}
-
+	label, _ := json.Marshal(map[string]interface{}{"open": 1, "mode": "shooter"})
 	logger.Info("Match initialised")
 
-	return state, tickRate, "shooter"
+	return state, tickRate, string(label)
 }
 
 func (m *MatchHandlerShooter) MatchJoinAttempt(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presence runtime.Presence, metadata map[string]string) (interface{}, bool, string) {
@@ -98,6 +98,8 @@ func (m *MatchHandlerShooter) MatchJoin(ctx context.Context, logger runtime.Logg
 
 	if len(mState.Players) == maxPlayers && !mState.Started {
 		mState.Started = true
+		newLabel, _ := json.Marshal(map[string]interface{}{"open": 0, "mode": "shooter"})
+		dispatcher.MatchLabelUpdate(string(newLabel))
 		logger.Info("Match started with %v players", len(mState.Players))
 	}
 
