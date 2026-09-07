@@ -1,137 +1,135 @@
-Nakama Project Template
-===
+# NakamaLoadServer
 
-> An example project template on how to set up and write custom logic in Nakama server.
+Authoritative [Nakama](https://heroiclabs.com/) server for a small two player
+shooter, written as a Go runtime plugin. It exists to be load tested: the
+gameplay is deliberately minimal so the interesting part is how matchmaking and
+match lifecycle behave under many concurrent clients.
 
-The codebase shows a few simple gameplay features written in all three of the runtime framework languages supported by the server: Go, Lua, and TypeScript. The code shows how to read/write storage objects, send in-app notifications, parse JSON, update player wallets, and handle errors.
+Companion repositories:
 
-For more documentation have a look at:
+- [NakamaLoadTester](https://github.com/rohan-more/NakamaLoadTester) — Unity client
+- [NakamaLoadBot](https://github.com/rohan-more/NakamaLoadBot) — headless Go bots for load testing
 
-* https://heroiclabs.com/docs/nakama/server-framework/introduction/index.html
-* https://heroiclabs.com/docs/nakama/concepts/storage/
-* https://heroiclabs.com/docs/nakama/concepts/user-accounts/#virtual-wallet
-* https://heroiclabs.com/docs/nakama/concepts/notifications/
-* https://heroiclabs.com/docs/nakama/concepts/multiplayer/authoritative/
+## Running
 
-For a detailed guide on setting up TypeScript check out the [Setup page](https://heroiclabs.com/docs/nakama/server-framework/typescript-runtime/).
-
-__NOTE__ You can remove the Go, Lua or TypeScript code within this project to develop with just the single language you prefer.
-
-### Prerequisites
-
-The codebase requires these development tools:
-
-* Go compiler and runtime: 1.15.2 or greater.
-* Docker Engine: 19.0.0 or greater.
-* Node v14 (active LTS) or greater.
-* Basic UNIX tools or knowledge on the Windows equivalents.
-
-### Go Dependencies
-
-The project uses Go modules which should be vendored as normal:
-
-```shell
-env GO111MODULE=on GOPRIVATE="github.com" go mod vendor
-```
-
-### TypeScript Dependencies
-
-The project uses NPM to manage dependencies which can be installed as normal:
-
-```shell
-npm install
-```
-
-Before you start the server you can transpile the TypeScript code to JavaScript code with the TypeScript compiler:
-
-```shell
-npx tsc
-```
-
-The bundled JavaScript code output can be found in "build/index.js".
-
-### Start
-
-The recommended workflow is to use Docker and the compose file to build and run the game server, database resources and tensorflow-serving (AI model server).
-
-```shell
-docker compose up --build nakama
-```
-
-### Recompile / Run
-
-When the containers have been started as shown above you can replace just the game server custom code and recompile it with the `-d` option.
+Requires Docker. The Go plugin is compiled inside the build, so no local Go
+toolchain is needed.
 
 ```shell
 docker compose up -d --build nakama
 ```
 
-### Stop
-
-To stop all running containers you can use the Docker compose sub-command.
-
-```shell
-docker compose down
-```
-
-You can wipe the database and workspace with `docker compose down -v` to remove the disk volumes.
-
-### Run RPC function
-
-A bunch of RPC IDs are registered with the server logic. A couple of these are:
-
-* "rewards" in Go or as "reward" in Lua.
-* "refreshes" in Go or as "refresh" in Lua.
-
-To execute the RPC function with cURL generated a session token:
+Nakama listens on 7350 (client API) and 7351 ([console](http://127.0.0.1:7351),
+default login `admin:password`). Rebuild after changing Go code by rerunning the
+same command.
 
 ```shell
-curl "127.0.0.1:7350/v2/account/authenticate/device" --data "{\"id\": \""$(uuidgen)"\"}" --user 'defaultkey:'
+docker compose down      # stop
+docker compose down -v   # stop and wipe the database volume
 ```
 
-Take the session token in the response and use it to execute the RPC function as the user:
+Match state lives in memory, so restarting `nakama` clears all in-flight
+matches. Accounts persist in Postgres.
+
+## The match
+
+A match is `maxPlayers = 2`, runs at `tickRate = 10` ticks per second, and each
+player starts on `startingHealth = 100`.
+
+- Shooting picks a random living opponent and deals 1–10 damage.
+- A player may shoot once per `cooldownTicks = 20` (2 seconds); earlier shots
+  are discarded server side.
+- The match starts once both slots are filled, and is decided when at most one
+  player is left standing.
+- Once decided it stays alive for 50 ticks (5 seconds) so clients reliably
+  receive the result before Nakama tears it down.
+- A match left empty for `idleTicks` (30 seconds) is closed, so abandoned
+  matches don't accumulate and get handed back out by matchmaking.
+
+Leaving is a forfeit while the match is running, which drops the leaver to zero
+health and resolves the other player as the winner. Leaving before the match
+starts frees the slot outright.
+
+### Opcodes
+
+| Opcode | Direction | Payload |
+| --- | --- | --- |
+| 1 `OpCodeShoot` | client to server | none |
+| 2 `OpCodeStateSync` | server to clients | `{"players":[{"user_id","username","health"}],"started":bool}` |
+| 3 `OpCodeMatchOver` | server to clients | `{"winner_id","winner_username"}` |
+
+State sync is broadcast when a player joins or leaves and whenever damage is
+dealt. On match over, empty winner fields mean a draw, which happens when both
+players forfeit.
+
+Players are sent as a list rather than a map keyed by user id because Unity's
+`JsonUtility` cannot deserialize a map.
+
+## RPCs
+
+All require an authenticated session.
+
+| RPC | Response | Purpose |
+| --- | --- | --- |
+| `find_match` | `{"match_id","created"}` | Join an open match, or create one if there isn't a joinable match. `created` reports which happened. |
+| `create_match` | `{"match_id"}` | Always create a new match. |
+| `add_score` | `{"new_score"}` | Adds points to the caller's stored score. Takes `{"points": n}` where n is 1–100. |
+| `rewards` | `{"coins_received"}` | Daily reward, from the upstream template. |
+
+Clients cannot create authoritative matches directly. `socket.CreateMatchAsync()`
+makes a *relayed* match with no server handler attached, which silently does
+nothing here: no `MatchInit`, no state broadcasts. Creation has to go through
+`find_match` or `create_match`, and the client then joins the returned id over
+its socket.
+
+### Calling an RPC by hand
 
 ```shell
-curl "127.0.0.1:7350/v2/rpc/rewards" -H 'Authorization: Bearer $TOKEN' --data '""'
+curl "127.0.0.1:7350/v2/account/authenticate/device" --data "{\"id\": \"00000000-0000-0000-0000-000000000001\"}" --user 'defaultkey:'
+curl "127.0.0.1:7350/v2/rpc/find_match" -H "Authorization: Bearer $TOKEN" --data '"{}"'
 ```
 
-This will generate an RPC response on the initial response in that day and grant no more until the rollover.
+The [console API explorer](http://127.0.0.1:7351/apiexplorer) does the same
+without the token juggling.
 
-```
-{"payload":"{\"coins_received\":500}"}
-or
-{"payload":"{\"coins_received\":0}"}
-```
+## Matchmaking notes
 
-You can also skip the cURL steps and use the [Nakama Console's API Explorer](http://127.0.0.1:7351/apiexplorer) to execute the RPCs.
+Two things about `find_match` are worth knowing, because both were found by
+load testing rather than by reading the code.
 
-### Authoritative Multiplayer
+**The match index lags `MatchCreate`.** A match created moments ago is not yet
+visible to `MatchList`, so callers arriving together each saw an empty list and
+each created their own match instead of pairing. `find_match` serialises the
+find-or-create decision and remembers the match it last created, checking it
+directly with `MatchGet`.
 
-The authoritative multiplayer example includes a match handler that defines game logic, and an RPC function players should call to find a match they can join or have the server create one for them if none are available.
+**A handout is not an arrival.** `find_match` returns an id, but the client
+joins over its socket afterwards, so the match still reads as empty while
+callers are on their way to it. Without accounting for that, one free slot gets
+promised to every caller in a burst and all but one are rejected on arrival.
+Each handout now holds a seat against the match for 10 seconds, and capacity
+checks count held seats alongside players who have already arrived.
 
-Running the match finder RPC function registered as RPC ID "find_match" returns one or more match IDs that fit the user's criteria:
+## Usernames
 
-```shell
-curl "127.0.0.1:7350/v2/rpc/find_match" -H 'Authorization: Bearer $TOKEN' --data '"{}"'
-```
+New accounts are renamed in an after-authenticate hook to an adjective-noun-number
+name. The pool is small enough that names collide once there are a few hundred
+accounts, so a collision falls back to appending part of the user id, which is
+unique by definition. A name that still cannot be set is logged and ignored
+rather than failing the authentication that already succeeded.
 
-This will return one or more match IDs:
+Note the session token is minted before this hook runs, so `session.Username`
+on the client is the pre-rename name. Clients should read the account back
+instead.
 
-```
-{"payload":"{\"match_ids\":[\"match ID 1\","match ID 2\",\"...\"]}"}
-```
+## Leftovers from the upstream template
 
-To join one of these matches check our [matchmaker documentation](https://heroiclabs.com/docs/nakama/concepts/multiplayer/matchmaker/#join-a-match).
+This started from [nakama-project-template](https://github.com/heroiclabs/nakama-project-template)
+and some of it is still around:
 
-### AI/ML model
-
-In addition to starting Nakama and database, `docker-compose.yml` file
-also defines the `tf` container, an instance of [TFX](https://www.tensorflow.org/tfx) (formerly known as `Tensorflow Serving`), a service to serve
-pre-trained machine learning models.
-The model itself is located in the [./model](./model) directory.
-
-### Contribute
-
-The development roadmap is managed as GitHub issues and pull requests are welcome. If you're interested to add a gameplay feature as a new example; which is not mentioned on the issue tracker please open one to create a discussion or drop in and discuss it in the [community forum](https://forum.heroiclabs.com).
-
-Finally, we love feedback and would love to hear from you. Please join our [Forums](https://forum.heroiclabs.com/) and connect with us today!
+- The Lua and TypeScript runtimes still load and register their own RPCs
+  (`reward`, `rewards_js`, `find_match_js`). They are unused by the clients here.
+- `docker-compose.yml` still defines a `tf` service and `./model` holds a
+  pre-trained model used by the template's tic-tac-toe AI opponent. The Go AI
+  code was removed when the match handler became a shooter, so nothing in the
+  Go runtime calls it.
