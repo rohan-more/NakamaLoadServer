@@ -20,7 +20,22 @@ const (
 	startingHealth  = 100
 	cooldownTicks   = 20 // 2 seconds at 10 ticks/sec
 	tickRate        = 10
+
+	// A match nobody is in is closed rather than left to linger, otherwise
+	// abandoned matches accumulate and matchmaking keeps handing them out.
+	idleTicks = 30 * tickRate
 )
+
+// matchLabel is what find_match queries against. Matches advertise themselves
+// as open only while they can still take a player.
+func matchLabel(open bool) string {
+	value := 0
+	if open {
+		value = 1
+	}
+	label, _ := json.Marshal(map[string]interface{}{"open": value, "mode": moduleName})
+	return string(label)
+}
 
 type MatchOverPayload struct {
 	WinnerID       string `json:"winner_id"`
@@ -42,6 +57,8 @@ type MatchState struct {
 	// before the handler returns nil and Nakama tears the match down.
 	Finished     bool  `json:"finished"`
 	FinishedTick int64 `json:"finished_tick"`
+	// Consecutive ticks with nobody in the match, used to close it.
+	EmptyTicks int `json:"empty_ticks"`
 }
 
 // Wire format for broadcastState. Unity's JsonUtility can't deserialize a
@@ -64,14 +81,19 @@ func (m *MatchHandlerShooter) MatchInit(ctx context.Context, logger runtime.Logg
 		Players: make(map[string]*PlayerState),
 		Started: false,
 	}
-	label, _ := json.Marshal(map[string]interface{}{"open": 1, "mode": "shooter"})
 	logger.Info("Match initialised")
 
-	return state, tickRate, string(label)
+	return state, tickRate, matchLabel(true)
 }
 
 func (m *MatchHandlerShooter) MatchJoinAttempt(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presence runtime.Presence, metadata map[string]string) (interface{}, bool, string) {
 	mState, _ := state.(*MatchState)
+
+	// The match is kept alive briefly after it is decided so clients can
+	// receive the result; nobody new should be let in during that window.
+	if mState.Finished {
+		return mState, false, "match finished"
+	}
 
 	if len(mState.Players) >= maxPlayers {
 		return mState, false, "match full"
@@ -98,8 +120,7 @@ func (m *MatchHandlerShooter) MatchJoin(ctx context.Context, logger runtime.Logg
 
 	if len(mState.Players) == maxPlayers && !mState.Started {
 		mState.Started = true
-		newLabel, _ := json.Marshal(map[string]interface{}{"open": 0, "mode": "shooter"})
-		dispatcher.MatchLabelUpdate(string(newLabel))
+		_ = dispatcher.MatchLabelUpdate(matchLabel(false))
 		logger.Info("Match started with %v players", len(mState.Players))
 	}
 
@@ -109,6 +130,18 @@ func (m *MatchHandlerShooter) MatchJoin(ctx context.Context, logger runtime.Logg
 }
 func (m *MatchHandlerShooter) MatchLoop(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, messages []runtime.MatchData) interface{} {
 	mState, _ := state.(*MatchState)
+
+	// Checked before the not-started guard below: a match abandoned before it
+	// ever started is exactly the one that needs closing.
+	if len(mState.Players) == 0 {
+		mState.EmptyTicks++
+		if mState.EmptyTicks >= idleTicks {
+			logger.Info("Closing idle match")
+			return nil
+		}
+	} else {
+		mState.EmptyTicks = 0
+	}
 
 	if !mState.Started {
 		return mState
@@ -155,6 +188,8 @@ func (m *MatchHandlerShooter) MatchLoop(ctx context.Context, logger runtime.Logg
 		logger.Info("Match over")
 		mState.Finished = true
 		mState.FinishedTick = tick
+		// Stop advertising to matchmaking before the grace period starts.
+		_ = dispatcher.MatchLabelUpdate(matchLabel(false))
 		broadcastMatchOver(logger, dispatcher, mState)
 	}
 
@@ -243,17 +278,28 @@ func (m *MatchHandlerShooter) MatchLeave(ctx context.Context, logger runtime.Log
 	mState, _ := state.(*MatchState)
 
 	for _, p := range presences {
-		if player, ok := mState.Players[p.GetUserId()]; ok {
+		player, ok := mState.Players[p.GetUserId()]
+		if !ok {
+			continue
+		}
+
+		if mState.Started {
+			// Mid match there is something to forfeit: keep the player in the
+			// list at zero health so the other player resolves as the winner.
 			player.Health = 0
 			logger.Info("Player forfeited: %v", p.GetUserId())
+			continue
 		}
+
+		// Before the match starts there is nothing to forfeit, so free the
+		// slot outright. Leaving a zero health entry behind would keep the
+		// match permanently full and make the next player to join win
+		// instantly against the leftover.
+		delete(mState.Players, p.GetUserId())
+		logger.Info("Player left before start: %v", p.GetUserId())
 	}
 
 	broadcastState(logger, dispatcher, mState)
-
-	if isMatchOver(mState) {
-		logger.Info("Match over by forfeit")
-	}
 
 	return mState
 }
