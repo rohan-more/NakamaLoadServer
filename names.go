@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"strings"
 
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -34,17 +35,42 @@ func afterAuthenticateDevice(ctx context.Context, logger runtime.Logger, db *sql
 		return errNoUserIdFound
 	}
 
-	name := fmt.Sprintf("%s%s%d",
-		adjectives[rand.Intn(len(adjectives))],
-		nouns[rand.Intn(len(nouns))],
-		rand.Intn(100),
-	)
+	name := randomName()
 
-	if err := nk.AccountUpdateId(ctx, userID, name, nil, "", "", "", "", ""); err != nil {
-		logger.Error("AccountUpdateId error: %v", err)
-		return err
+	err := nk.AccountUpdateId(ctx, userID, name, nil, "", "", "", "", "")
+	if err != nil {
+		// The pool is small enough that names start colliding after a few
+		// hundred accounts, so retrying into it just rolls the same dice.
+		// Fall back to a suffix taken from the user id, which is unique by
+		// definition and therefore settles this in one more call.
+		name = fmt.Sprintf("%s-%s", name, shortID(userID))
+		err = nk.AccountUpdateId(ctx, userID, name, nil, "", "", "", "", "")
+	}
+	if err != nil {
+		// A display name is cosmetic. Returning the error here would fail the
+		// authentication that already succeeded, so log it and move on.
+		logger.Warn("AccountUpdateId error for %v: %v", userID, err)
+		return nil
 	}
 
 	logger.Info("Assigned username %v to %v", name, userID)
 	return nil
+}
+
+func randomName() string {
+	return fmt.Sprintf("%s%s%d",
+		adjectives[rand.Intn(len(adjectives))],
+		nouns[rand.Intn(len(nouns))],
+		rand.Intn(1000),
+	)
+}
+
+// shortID returns the leading hex of a user id, which is a UUID, so this is
+// enough to tell any two accounts apart.
+func shortID(userID string) string {
+	id := strings.ReplaceAll(userID, "-", "")
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
