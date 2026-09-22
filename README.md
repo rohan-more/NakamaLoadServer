@@ -134,13 +134,27 @@ value, rather than quietly running a different mode. The ladder runner in
 [NakamaLoadBot](https://github.com/rohan-more/NakamaLoadBot) switches modes
 automatically and measures each one.
 
-With 20 bots all starting at once, 30 seconds each:
+Bots all starting at once, 60 seconds per run, one machine:
 
-| Mode | Matches created | Join failures | Orphaned matches |
-| --- | --- | --- | --- |
-| `naive` | 20 of 20 joins, every bot alone | 0% | 20 |
-| `serialized` | 7 | 48.7% | 0 |
-| `seats` | 10, one per pair | 0% | 0 |
+| Mode | Bots | Games started | Orphaned matches | Join failures | `find_match` p95 |
+| --- | --- | --- | --- | --- | --- |
+| `naive` | 100 | 0 | 100 | 0% | 29.0 ms |
+| `naive` | 500 | 180 | 190 | 15.0% | 41.6 ms |
+| `serialized` | 100 | 96 | 1 | 52.3% | 15.3 ms |
+| `serialized` | 500 | 480 | 1 | 47.8% | 51.1 ms |
+| `seats` | 100 | 100 | 0 | 0% | 33.8 ms |
+| `seats` | 500 | 496 | 1 | 0% | 94.7 ms |
+
+`naive` fails silently: at 100 bots there are no join failures at all, yet no
+game starts, because every bot has created and joined its own empty match. It
+only shows up as orphaned matches. `serialized` pairs players but rejects about
+half of all joins. `seats` pairs everyone with no rejections, at the cost of
+`find_match` latency under a burst, since every call waits on the same lock.
+With a 100ms stagger between bots all three modes mostly cope.
+
+The full grid, including staggered starts and 20 bot runs, is in
+[NakamaLoadBot's benchmarks](https://github.com/rohan-more/NakamaLoadBot/tree/master/benchmarks/2026-09-22-local).
+These are localhost figures, bots and server on the same machine.
 
 ## Usernames
 
