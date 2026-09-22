@@ -113,6 +113,35 @@ user joins, from which point the match size counts them instead; an unused seat
 expires after 10 seconds. Holding it until expiry instead would count a new
 arrival twice, and the match would read as full to everyone after them.
 
+### Switching the fixes off
+
+Both fixes can be turned off with `MATCHMAKING_MODE`, so their effect can be
+reproduced rather than taken on trust. Each level includes the one before it.
+
+| Mode | Behaviour |
+| --- | --- |
+| `naive` | List open matches and create one if none are found. Callers arriving together each create their own match. |
+| `serialized` | Serialise find-or-create and hand out the last created match directly. Fixes duplicate creation, but a burst still gets one slot promised to many callers. |
+| `seats` | Also hold a seat per handout until the player joins. The default. |
+
+```shell
+MATCHMAKING_MODE=naive docker compose up -d --force-recreate nakama
+```
+
+In PowerShell set it first with `$env:MATCHMAKING_MODE="naive"`. The server
+logs `Matchmaking mode: <mode>` at startup and refuses to start on an unknown
+value, rather than quietly running a different mode. The ladder runner in
+[NakamaLoadBot](https://github.com/rohan-more/NakamaLoadBot) switches modes
+automatically and measures each one.
+
+With 20 bots all starting at once, 30 seconds each:
+
+| Mode | Matches created | Join failures | Orphaned matches |
+| --- | --- | --- | --- |
+| `naive` | 20 of 20 joins, every bot alone | 0% | 20 |
+| `serialized` | 7 | 48.7% | 0 |
+| `seats` | 10, one per pair | 0% | 0 |
+
 ## Usernames
 
 New accounts are renamed in an after-authenticate hook to an adjective-noun-number

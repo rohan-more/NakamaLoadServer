@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -13,6 +14,38 @@ import (
 type findMatchResponse struct {
 	MatchID string `json:"match_id"`
 	Created bool   `json:"created"`
+}
+
+// matchmakingMode selects how much of the find_match hardening is active, so
+// the fixes can be switched off and their effect measured under load. Each
+// level includes the one before it.
+type matchmakingMode string
+
+const (
+	// List open matches and create one if none are found. Callers arriving
+	// together each see an empty list, since the index lags MatchCreate, and
+	// each create their own match.
+	modeNaive matchmakingMode = "naive"
+	// Serialise find-or-create and hand the last created match straight to the
+	// next caller. Fixes duplicate creation, but still promises one free slot
+	// to every caller in a burst because a handout isn't an arrival.
+	modeSerialized matchmakingMode = "serialized"
+	// Also hold a seat per handout until the player joins.
+	modeSeats matchmakingMode = "seats"
+)
+
+// matchmaking is set once in InitModule and only read afterwards.
+var matchmaking = modeSeats
+
+func parseMatchmakingMode(value string) (matchmakingMode, error) {
+	switch mode := matchmakingMode(value); mode {
+	case "":
+		return modeSeats, nil
+	case modeNaive, modeSerialized, modeSeats:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown MATCHMAKING_MODE %q, want naive, serialized or seats", value)
+	}
 }
 
 // How long a handed out seat is held before it is assumed the client never
@@ -54,8 +87,10 @@ func rpcFindMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
 		return "", errNoUserIdFound
 	}
 
-	matchmakingMu.Lock()
-	defer matchmakingMu.Unlock()
+	if matchmaking != modeNaive {
+		matchmakingMu.Lock()
+		defer matchmakingMu.Unlock()
+	}
 
 	now := time.Now()
 	sweepSeats(now)
@@ -74,10 +109,14 @@ func rpcFindMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
 			return "", errInternalError
 		}
 		resp.MatchID, resp.Created = matchID, true
-		lastCreated = matchID
+		if matchmaking != modeNaive {
+			lastCreated = matchID
+		}
 	}
 
-	holdSeat(resp.MatchID, userID, now.Add(seatTTL))
+	if matchmaking == modeSeats {
+		holdSeat(resp.MatchID, userID, now.Add(seatTTL))
+	}
 
 	out, err := json.Marshal(resp)
 	if err != nil {
@@ -91,11 +130,11 @@ func rpcFindMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
 
 // findJoinable returns a match with room for another player once seats already
 // promised are counted, or "" if there isn't one. Callers must hold
-// matchmakingMu.
+// matchmakingMu, except in naive mode, which doesn't touch lastCreated.
 func findJoinable(ctx context.Context, logger runtime.Logger, nk runtime.NakamaModule, now time.Time) (string, error) {
 	// The match we handed out last is the one least likely to be indexed yet,
 	// so check it directly before falling back to the listing.
-	if lastCreated != "" {
+	if matchmaking != modeNaive && lastCreated != "" {
 		match, err := nk.MatchGet(ctx, lastCreated)
 		switch {
 		case err != nil:
@@ -129,6 +168,9 @@ func findJoinable(ctx context.Context, logger runtime.Logger, nk runtime.NakamaM
 // hasRoom reports whether a match has a slot left once players still on their
 // way are counted alongside the players who have already arrived.
 func hasRoom(matchID string, size int, now time.Time) bool {
+	if matchmaking != modeSeats {
+		return size < maxPlayers
+	}
 	return size+liveSeats(matchID, now) < maxPlayers
 }
 

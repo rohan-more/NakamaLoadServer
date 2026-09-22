@@ -40,6 +40,14 @@ const (
 func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
 	initStart := time.Now()
 
+	env, _ := ctx.Value(runtime.RUNTIME_CTX_ENV).(map[string]string)
+	mode, err := parseMatchmakingMode(env["MATCHMAKING_MODE"])
+	if err != nil {
+		return err
+	}
+	matchmaking = mode
+	logger.Info("Matchmaking mode: %v", matchmaking)
+
 	if err := initializer.RegisterRpc(rpcIdRewards, rpcRewards); err != nil {
 		return err
 	}
