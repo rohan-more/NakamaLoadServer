@@ -25,20 +25,32 @@ const seatTTL = 10 * time.Second
 // together each see an empty list and each create their own match instead of
 // pairing up. The mutex serialises the find-or-create decision and lastCreated
 // hands the freshly made match to the next caller directly.
-//
-// seats then covers the other half of the problem: find_match returns an id
-// but the client joins over its socket afterwards, so a match still reads as
-// empty while callers are on their way to it. Without holding a seat per
-// handout, one free slot gets promised to every caller in a burst and all but
-// one are rejected on arrival.
 var (
 	matchmakingMu sync.Mutex
 	lastCreated   string
-	seats         = make(map[string][]time.Time)
+)
+
+// seats covers the other half of the problem: find_match returns an id but the
+// client joins over its socket afterwards, so a match still reads as empty
+// while callers are on their way to it. Without holding a seat per handout,
+// one free slot gets promised to every caller in a burst and all but one are
+// rejected on arrival.
+//
+// Seats are keyed by user and released by MatchJoin when that user arrives.
+// Holding them until expiry instead would count a player twice for the
+// lifetime of the seat, once as a presence and once as a seat, and the match
+// would read as full to everyone who came after them.
+//
+// seatsMu is separate from matchmakingMu so the match loop can release a seat
+// without waiting on matchmaking. Lock order is matchmakingMu then seatsMu.
+var (
+	seatsMu sync.Mutex
+	seats   = make(map[string]map[string]time.Time) // match id -> user id -> expiry
 )
 
 func rpcFindMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	if _, ok := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string); !ok {
+	userID, ok := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+	if !ok {
 		return "", errNoUserIdFound
 	}
 
@@ -65,8 +77,7 @@ func rpcFindMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
 		lastCreated = matchID
 	}
 
-	// Hold a seat for the caller until they actually join.
-	seats[resp.MatchID] = append(seats[resp.MatchID], now.Add(seatTTL))
+	holdSeat(resp.MatchID, userID, now.Add(seatTTL))
 
 	out, err := json.Marshal(resp)
 	if err != nil {
@@ -115,37 +126,69 @@ func findJoinable(ctx context.Context, logger runtime.Logger, nk runtime.NakamaM
 	return "", nil
 }
 
-// hasRoom reports whether a match has a slot left once outstanding handouts
-// are counted alongside the players who have already arrived.
+// hasRoom reports whether a match has a slot left once players still on their
+// way are counted alongside the players who have already arrived.
 func hasRoom(matchID string, size int, now time.Time) bool {
 	return size+liveSeats(matchID, now) < maxPlayers
 }
 
-// liveSeats prunes expired handouts for one match and returns what remains.
+func holdSeat(matchID, userID string, expiry time.Time) {
+	seatsMu.Lock()
+	defer seatsMu.Unlock()
+	held, ok := seats[matchID]
+	if !ok {
+		held = make(map[string]time.Time)
+		seats[matchID] = held
+	}
+	held[userID] = expiry
+}
+
+// releaseSeat is called from MatchJoin once the user is present in the match,
+// from which point they are counted by the match size instead.
+func releaseSeat(matchID, userID string) {
+	seatsMu.Lock()
+	defer seatsMu.Unlock()
+	held, ok := seats[matchID]
+	if !ok {
+		return
+	}
+	delete(held, userID)
+	if len(held) == 0 {
+		delete(seats, matchID)
+	}
+}
+
+// liveSeats prunes expired seats for one match and returns what remains.
 func liveSeats(matchID string, now time.Time) int {
+	seatsMu.Lock()
+	defer seatsMu.Unlock()
+	return pruneLocked(matchID, now)
+}
+
+func pruneLocked(matchID string, now time.Time) int {
 	held := seats[matchID]
-	kept := held[:0]
-	for _, expiry := range held {
-		if expiry.After(now) {
-			kept = append(kept, expiry)
+	for userID, expiry := range held {
+		if !expiry.After(now) {
+			delete(held, userID)
 		}
 	}
-	if len(kept) == 0 {
+	if len(held) == 0 {
 		delete(seats, matchID)
 		return 0
 	}
-	seats[matchID] = kept
-	return len(kept)
+	return len(held)
 }
 
 // sweepSeats keeps the map from growing without bound; matches that are never
 // looked at again would otherwise hold their entry forever.
 func sweepSeats(now time.Time) {
+	seatsMu.Lock()
+	defer seatsMu.Unlock()
 	if len(seats) < 512 {
 		return
 	}
 	for matchID := range seats {
-		liveSeats(matchID, now)
+		pruneLocked(matchID, now)
 	}
 }
 

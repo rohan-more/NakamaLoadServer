@@ -107,8 +107,11 @@ directly with `MatchGet`.
 joins over its socket afterwards, so the match still reads as empty while
 callers are on their way to it. Without accounting for that, one free slot gets
 promised to every caller in a burst and all but one are rejected on arrival.
-Each handout now holds a seat against the match for 10 seconds, and capacity
-checks count held seats alongside players who have already arrived.
+Each handout now holds a seat for that user, and capacity checks count held
+seats alongside players who have already arrived. The seat is released when the
+user joins, from which point the match size counts them instead; an unused seat
+expires after 10 seconds. Holding it until expiry instead would count a new
+arrival twice, and the match would read as full to everyone after them.
 
 ## Usernames
 

@@ -108,7 +108,12 @@ func (m *MatchHandlerShooter) MatchJoinAttempt(ctx context.Context, logger runti
 func (m *MatchHandlerShooter) MatchJoin(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
 	mState, _ := state.(*MatchState)
 
+	// find_match held a seat for each of these players; now they're present
+	// they are counted by the match size instead, so give the seat back.
+	matchID, _ := ctx.Value(runtime.RUNTIME_CTX_MATCH_ID).(string)
+
 	for _, p := range presences {
+		releaseSeat(matchID, p.GetUserId())
 		mState.Players[p.GetUserId()] = &PlayerState{
 			UserID:       p.GetUserId(),
 			Username:     p.GetUsername(),
